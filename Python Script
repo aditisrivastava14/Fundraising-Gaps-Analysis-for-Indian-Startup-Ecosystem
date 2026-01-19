@@ -1,0 +1,166 @@
+# -------------------------------
+# Load libraries & dataset
+# -------------------------------
+import pandas as pd
+df = pd.read_csv("startup_funding.csv")
+
+# Quick data check
+df.head()
+df.info()
+df.describe()
+
+# -------------------------------
+# Rename columns for consistency
+# -------------------------------
+df = df.rename(columns={
+    'Date dd/mm/yyyy': 'date',
+    'Startup Name': 'startup',
+    'Industry Vertical': 'sector',
+    'SubVertical': 'sub_sector',
+    'City  Location': 'city',
+    'Investors Name': 'investors',
+    'InvestmentnType': 'investment_type',
+    'Amount in USD': 'funding_usd'
+})
+
+# -------------------------------
+# Clean & convert funding amount
+# -------------------------------
+df['funding_usd'] = (
+    df['funding_usd']
+    .astype(str)
+    .str.replace(',', '')
+)
+df['funding_usd'] = pd.to_numeric(df['funding_usd'], errors='coerce')
+
+# -------------------------------
+# Convert USD to INR Crores
+# -------------------------------
+USD_TO_INR = 83
+df['funding_inr'] = df['funding_usd'] * USD_TO_INR
+df['funding_crore'] = df['funding_inr'] / 10_000_000
+
+# Remove unnecessary columns
+df = df.drop(columns=['Remarks', 'funding_inr'])
+
+# -------------------------------
+# Date processing
+# -------------------------------
+df['date'] = pd.to_datetime(df['date'], format='%d/%m/%Y', errors='coerce')
+df['year'] = df['date'].dt.year
+
+# -------------------------------
+# Clean startup names (remove URLs)
+# -------------------------------
+df['startup'] = df['startup'].astype(str)
+df['startup'] = df['startup'].apply(
+    lambda x: x if not x.startswith('http') else None
+)
+df = df.dropna(subset=['startup'])
+
+# -------------------------------
+# Create stage buckets
+# -------------------------------
+def map_stage(x):
+    x = str(x).lower()
+    if any(k in x for k in ['seed', 'angel', 'pre-series', 'series a']):
+        return 'Early Stage'
+    elif any(k in x for k in ['series b', 'series c']):
+        return 'Growth Stage'
+    elif any(k in x for k in ['private equity', 'series d', 'series e', 'debt']):
+        return 'Late Stage'
+    else:
+        return 'Other'
+
+df['stage_bucket'] = df['investment_type'].apply(map_stage)
+
+# -------------------------------
+# Standardize sector names
+# -------------------------------
+df['sector'] = df['sector'].astype(str).str.strip().str.lower()
+
+sector_map = {
+    'e commerce': 'ecommerce',
+    'e-commerce': 'ecommerce',
+    'e commerce platforms': 'ecommerce',
+    'fin-tech': 'fintech',
+    'fin tech': 'fintech',
+    'health care': 'healthcare'
+}
+df['sector'] = df['sector'].replace(sector_map)
+
+# Remove missing sector values
+import numpy as np
+df['sector'] = df['sector'].replace('nan', np.nan)
+df = df.dropna(subset=['sector'])
+
+# -------------------------------
+# Sector-level fundraising gap
+# -------------------------------
+sector_startup_count = (
+    df.groupby('sector')['startup']
+    .nunique()
+    .reset_index(name='startup_count')
+)
+
+sector_funding = (
+    df.groupby('sector')['funding_crore']
+    .sum()
+    .reset_index(name='total_funding_crore')
+)
+
+sector_gap = pd.merge(
+    sector_startup_count,
+    sector_funding,
+    on='sector'
+)
+
+sector_gap['funding_per_startup_crore'] = (
+    sector_gap['total_funding_crore'] / sector_gap['startup_count']
+)
+
+# -------------------------------
+# Stage-wise funding analysis
+# -------------------------------
+stage_summary = (
+    df.groupby('stage_bucket')
+    .agg(
+        startup_count=('startup', 'nunique'),
+        total_funding_crore=('funding_crore', 'sum')
+    )
+    .reset_index()
+)
+
+# -------------------------------
+# City-level funding analysis
+# -------------------------------
+df['city'] = df['city'].astype(str).str.strip().str.lower()
+
+city_map = {
+    'bangalore': 'bengaluru',
+    'gurgaon': 'gurugram',
+    'new delhi': 'delhi'
+}
+df['city'] = df['city'].replace(city_map)
+
+# Remove non-India & locality entries
+df = df[~df['city'].isin(['menlo park', 'california'])]
+df['city'] = df['city'].replace({
+    'kormangala': 'bengaluru',
+    'koramangala': 'bengaluru'
+})
+
+city_summary = (
+    df.groupby('city')['funding_crore']
+    .sum()
+    .reset_index(name='total_funding_crore')
+    .sort_values('total_funding_crore', ascending=False)
+)
+
+# -------------------------------
+# Export final datasets
+# -------------------------------
+sector_gap.to_csv('sector_fundraising_gap_final.csv', index=False)
+city_summary.to_csv('city_funding_summary_final.csv', index=False)
+stage_summary.to_csv('stage_funding_summary_final.csv', index=False)
+df.to_csv('clean_startup_funding_india_final.csv', index=False)
